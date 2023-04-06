@@ -1,0 +1,429 @@
+```
+Este código implementa um modelo de deep reinforcement learning para prever a vida útil remanescente (RUL) e monitorar a condição da ferramenta (TCM) em processos de fresamento.
+
+A técnica utilizada pode melhorar a qualidade da peça em relação aos métodos convencionais.
+
+Os dados coletados incluem força de corte, vibração, som e corrente elétrica, que foram usados para treinar um agente inteligente a controlar os parâmetros do processo.
+
+O conjunto de dados coletados foi pequeno e foi realizado um planejamento experimental com fatorial multinível com 2 fatores, 4 níveis e 3 réplicas, totalizando 48 ensaios.
+
+O material da peça usinada foi um aço utilizado em confecção de moldes e matrizes.
+
+A usinagem da peça foi um fresamento concordante de passe único.
+
+As variáveis independentes do processo foram o avanço por dente (0,03 - 0,05 - 0,07 - 0,1 mm) e a velocidade de corte (280 - 285 - 290 - 300 m/min).
+
+Os valores de RUL e TCM da ferramenta de corte foram calculados a partir dos dados de sensores e do critério de falha definido em Vb = 0,3 mm.
+
+Os sinais de força de corte, vibração, som e corrente elétrica foram usados como entrada para uma rede neural profunda que representa a função Q do agente.
+
+A recompensa do agente é definida como uma função da qualidade da peça.
+
+O agente é treinado pelo algoritmo DQN (Deep Q-Network), que usa uma memória de repetição para armazenar as transições entre estados, ações e recompensas, e usa uma rede neural alvo para estabilizar o aprendizado.
+
+Os resultados são comparados com outros métodos existentes na literatura, usando métricas para avaliar o RUL, TCM e a qualidade da peça usinada.
+```
+
+#Importando as bibliotecas necessárias
+import numpy as np 
+import pandas as pd 
+import matplotlib.pyplot as plt 
+import tensorflow as tf 
+from sklearn.preprocessing import MinMaxScaler 
+from sklearn.decomposition import PCA 
+from keras.models import Model 
+from keras.layers import Input, Conv1D, LSTM, Dense
+
+#Definindo os parâmetros do processo
+D = 10 # diâmetro da ferramenta (mm) 
+z = 4 # número de dentes da ferramenta 
+ap = 1 # profundidade de corte (mm) 
+ae = D # largura de corte (mm) 
+Vb = 0.3 # critério de falha da ferramenta (mm)
+
+#Definindo os níveis dos fatores do planejamento experimental
+fz = [0.03, 0.05, 0.07, 0.1] # avanço por dente (mm) 
+vc = [280, 285, 290, 300] # velocidade de corte (m/min)
+
+#Definindo as funções para calcular os parâmetros de processamento
+def calc_n(vc): # Calcula a velocidade do eixo-árvore (rpm) a partir da velocidade de corte (m/min) e do diâmetro da 	ferramenta (mm) n = (1000 * vc) / (np.pi * D) 
+	return n
+
+def calc_f(fz, z, n): # Calcula o avanço (mm/min) a partir do avanço por dente (mm), do número de dentes da ferramenta e da velocidade do eixo-árvore (rpm) 
+	f = fz * z * n 
+	return f
+
+def calc_Q(f, ap, ae): # Calcula a taxa de remoção de material (mm^3/min) a partir do avanço (mm/min), da profundidade de corte (mm) e da largura de corte (mm) 
+	Q = f * ap * ae 
+	return Q
+
+def calc_Kc(Fc, Q): # Calcula a potência específica de corte (N/mm^2) a partir da força resultante de corte (N) e da taxa de remoção de material (mm^3/min) 
+	Kc = Fc / Q 
+	return Kc
+
+#Carregando os dados dos sensores
+```
+Os dados estão em arquivos .wav com os nomes no formato ensaio_replica_sensor.wav
+Por exemplo: 1_1_force.wav significa o arquivo do sensor de força do ensaio 1 réplica 1
+Os dados estão organizados em uma pasta chamada “dados”
+```
+import os import wave
+
+#Criando uma lista vazia para armazenar os dados dos sensores
+sensor_data = []
+
+#Percorrendo os arquivos na pasta “dados”
+for file in os.listdir(“dados”): # Abrindo o arquivo como um objeto wave 
+	wav_file = wave.open(“dados/” + file, “r”) # Lendo os dados do arquivo como uma string de bytes 
+	data = wav_file.readframes(wav_file.getnframes()) # Convertendo os dados para um array numpy de inteiros 
+	data = np.frombuffer(data, dtype=np.int16) # Normalizando os dados para o intervalo entre -1 e 1 
+	data = data / np.max(np.abs(data)) # Fechando o arquivo 
+	wav_file.close() # Adicionando os dados à lista 
+	sensor_data sensor_data.append(data)
+
+#Convertendo a lista sensor_data em um array numpy
+sensor_data = np.array(sensor_data)
+
+#Verificando o formato do array sensor_data
+print(sensor_data.shape)
+```
+O formato é (192, 44100), ou seja, 192 arquivos com 44100 amostras cada um
+Segmentando os dados em janelas de tempo de 1 segundo com sobreposição de 50%
+Cada janela terá 44100 / 2 = 22050 amostras
+O número total de janelas será 192 x 2 - 1 = 383
+```
+#Criando uma lista vazia para armazenar os dados segmentados
+segmented_data = []
+
+#Percorrendo os arquivos na lista sensor_data
+for file in sensor_data: # Criando uma variável para armazenar o índice inicial da janela 
+	start_index = 0 # Criando um loop enquanto o índice inicial for menor que o número total de amostras
+	while start_index < len(file): # Criando uma variável para armazenar o índice final da janela 
+		end_index = start_index + 22050 # Verificando se o índice final é maior que o número total de amostras 
+	if end_index > len(file): # Se for maior, ajustar o índice final para o último valor possível 
+		end_index = len(file) # Extraindo a janela do arquivo usando os índices inicial e final 
+	window = file[start_index:end_index] # Adicionando a janela à lista 
+	segmented_data segmented_data.append(window) # Atualizando o índice inicial para a próxima janela com sobreposição 									de 50% start_index += 11025
+
+#Convertendo a lista segmented_data em um array numpy
+segmented_data = np.array(segmented_data)
+
+#Verificando o formato do array segmented_data
+print(segmented_data.shape)
+```
+O formato é (383, 22050), ou seja, 383 janelas com 22050 amostras cada uma
+Extraindo as características dos dados usando transformadas de Fourier e wavelet
+As transformadas de Fourier vão obter os espectros de frequência dos dados
+As transformadas wavelet vão obter os coeficientes wavelet dos dados
+```
+#Importando as bibliotecas necessárias
+import scipy.fftpack as fft import pywt
+
+#Criando uma lista vazia para armazenar os espectros de frequência
+frequency_data = []
+
+#Percorrendo as janelas na lista segmented_data
+for window in segmented_data: # Aplicando a transformada de Fourier na janela 
+	spectrum = fft.fft(window) # Calculando o módulo do espectro 
+	spectrum = np.abs(spectrum) # Normalizando o espectro pelo número de amostras 
+	spectrum = spectrum / len(window) # Adicionando o espectro à lista 
+	frequency_data frequency_data.append(spectrum)
+
+#Convertendo a lista frequency_data em um array numpy
+frequency_data = np.array(frequency_data)
+
+#Verificando o formato do array frequency_data
+print(frequency_data.shape)
+```
+O formato é (383, 22050), ou seja, 383 espectros com 22050 valores cada um
+```
+#Criando uma lista vazia para armazenar os coeficientes wavelet
+wavelet_data = []
+
+#Percorrendo as janelas na lista segmented_data
+for window in segmented_data: # Aplicando a transformada wavelet na janela usando a wavelet db4 e 4 níveis de decomposição 
+	coeffs = pywt.wavedec(window, “db4”, level=4) # Concatenando os coeficientes em um único vetor 
+	coeffs = np.concatenate(coeffs) # Adicionando os coeficientes à lista 
+	wavelet_data wavelet_data.append(coeffs)
+
+#Convertendo a lista wavelet_data em um array numpy
+wavelet_data = np.array(wavelet_data)
+#Verificando o formato do array wavelet_data
+print(wavelet_data.shape)
+```
+O formato é (383, 22050), ou seja, 383 vetores de coeficientes com 22050 valores cada um
+Treinando o agente usando um modelo de deep reinforcement learning
+O modelo usado é uma rede convolucional LSTM (ConvLSTM) que recebe como entrada os dados de frequência e wavelet e produz como saída um vetor Q que representa o valor esperado de recompensa para cada ação possível do agente
+```
+#Definindo as ações possíveis do agente
+actions = [“increase_fz”, “decrease_fz”, “increase_vc”, “decrease_vc”]
+
+#Definindo a recompensa do agente como uma função da qualidade da peça usinada
+def reward(Ra, C): #A qualidade da peça usinada é calculada usando um modelo matemático baseado na rugosidade superficial (Ra) e na 			 # circularidade (C) da peça. A função de recompensa é definida como o inverso da qualidade da peça usinada, ou seja, 			 # quanto menor a qualidade, menor a recompensa 
+	quality = Ra + C # essa é uma simplificação do modelo matemático real reward = 1 / quality return reward
+
+#Definindo a rede ConvLSTM que representa a função Q do agente
+#Criando uma camada de entrada que recebe os dados de frequência e wavelet como um tensor de formato (None, 2, 22050), onde None é o tamanho do lote e 2 é o número de canais (frequência e wavelet)
+input_layer = Input(shape=(2, 22050))
+
+#Criando uma camada convolucional que aplica filtros de tamanho 3 e passo 2 nos dados de entrada, reduzindo sua dimensão para (None, 32, 11025), onde 32 é o número de filtros aplicados
+conv_layer = Conv1D(filters=32, kernel_size=3, strides=2)(input_layer)
+
+#Criando uma camada LSTM que aplica células de memória de longo prazo nos dados convolucionados, mantendo sua dimensão em (None, 32, 11025)
+lstm_layer = LSTM(units=32, return_sequences=True)(conv_layer)
+
+#Criando uma camada densa que aplica uma transformação linear nos dados recorrentes, reduzindo sua dimensão para (None, 32, 4), onde 4 é o número de ações possíveis do agente
+dense_layer = Dense(units=4)(lstm_layer)
+
+#Criando uma camada de saída que calcula o vetor Q como a média dos valores da camada densa ao longo do eixo temporal, resultando em um tensor de formato (None, 4)
+output_layer = tf.reduce_mean(dense_layer, axis=1)
+
+#Criando o modelo ConvLSTM como um objeto Model que recebe a camada de entrada como entrada e a camada de saída como saída
+convlstm_model = Model(input_layer, output_layer)
+
+#Compilando o modelo ConvLSTM usando o otimizador Adam com taxa de aprendizado de 0.001 e a função de perda de erro quadrático médio
+convlstm_model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss=“mse”)
+
+#Resumindo o modelo ConvLSTM
+convlstm_model.summary()
+
+#Treinando o modelo ConvLSTM usando o algoritmo DQN
+#Criando uma variável para armazenar o tamanho da memória de repetição
+memory_size = 10000
+
+#Criando uma lista vazia para armazenar a memória de repetição
+memory = []
+
+#Criando uma variável para armazenar o fator de desconto
+gamma = 0.99
+
+#Criando uma variável para armazenar a taxa de exploração inicial
+epsilon = 1.0
+
+#Criando uma variável para armazenar a taxa de decaimento da exploração
+epsilon_decay = 0.995
+
+#Criando uma variável para armazenar a taxa de exploração mínima
+epsilon_min = 0.01
+
+#Criando uma variável para armazenar o número de episódios
+episodes = 48
+
+#Criando um loop para cada episódio
+for i in range(episodes): # Imprimindo o número do episódio 
+	print(f"Episode {i+1}") # Inicializando o estado atual como os dados do primeiro segundo do ensaio i 
+	current_state = segmented_data[i*2] # Inicializando a recompensa acumulada como zero 
+	total_reward = 0 # Inicializando o passo como zero 
+	step = 0 # Inicializando o fim do episódio como falso 
+	done = False # Criando um loop enquanto o episódio não terminar 
+	while not done: # Incrementando o passo em um 
+		step += 1 # Gerando um número aleatório entre 0 e 1 
+		random_number = np.random.rand() # Verificando se o número é menor que a taxa de exploração 
+	if random_number < epsilon: # Se for menor, escolher uma ação aleatória entre as possíveis 
+		action = np.random.choice(actions) else: # Se for maior, escolher a ação que maximiza o vetor Q previsto pelo modelo 										 ConvLSTM para o estado atual 
+			action = np.argmax(convlstm_model.predict(current_state)) # Executando a ação escolhida e observando o próximo 														estado, a recompensa e o fim do episódio 
+			next_state, reward, done = execute_action(action) # Adicionando a transição entre estado, ação, recompensa e próximo 											    estado à memória de repetição 
+			memory.append((current_state, action, reward, next_state)) # Atualizando o estado atual como o próximo estado 
+													 current_state = next_state # Atualizando a recompensa               													 acumulada como a soma da recompensa atual e da 														 recompensa anterior multiplicada pelo fator de desconto 
+			total_reward = reward + gamma * total_reward # Verificando se a memória de repetição está cheia 
+
+if len(memory) > memory_size:
+        # Se estiver cheia, remover o primeiro elemento da memória
+        memory.pop(0)
+    # Verificando se o episódio terminou
+    if done:
+        # Se terminou, imprimir a recompensa acumulada e o passo final
+        print(f"Total reward: {total_reward}")
+        print(f"Final step: {step}")
+        # Atualizando a taxa de exploração como o produto da taxa de exploração atual e da taxa de decaimento da exploração
+        epsilon = epsilon * epsilon_decay
+        # Verificando se a taxa de exploração é menor que a taxa de exploração mínima
+        if epsilon < epsilon_min:
+            # Se for menor, ajustar a taxa de exploração para a taxa de exploração mínima
+            epsilon = epsilon_min
+        # Sair do loop
+        break
+    # Criando uma variável para armazenar o tamanho do lote para o treinamento do modelo ConvLSTM
+    batch_size = 32
+    # Verificando se o tamanho da memória de repetição é maior ou igual ao tamanho do lote
+    if len(memory) >= batch_size:
+        # Se for maior ou igual, amostrar um lote aleatório da memória de repetição
+        batch = np.random.choice(memory, size=batch_size)
+        # Criando uma lista vazia para armazenar os estados do lote
+        states = []
+        # Criando uma lista vazia para armazenar os vetores Q alvo do lote
+        targets = []
+        # Percorrendo as transições no lote
+        for state, action, reward, next_state in batch:
+            # Adicionando o estado à lista states
+            states.append(state)
+            # Calculando o vetor Q alvo como a recompensa mais o produto do fator de desconto e o máximo valor do vetor Q previsto pelo modelo ConvLSTM para o próximo estado
+            target = reward + gamma * np.max(convlstm_model.predict(next_state))
+            # Adicionando o vetor Q alvo à lista targets
+            targets.append(target)
+        # Convertendo as listas states e targets em arrays numpy
+        states = np.array(states)
+        targets = np.array(targets)
+        # Treinando o modelo ConvLSTM no lote usando o método fit com uma época e sem validação ou verbosidade
+        convlstm_model.fit(states, targets, epochs=1, validation_split=0, verbose=0)
+
+#Salvando o modelo ConvLSTM em um arquivo .h5
+convlstm_model.save(“convlstm_model.h5”)
+
+#Carregando o modelo ConvLSTM de um arquivo .h5
+convlstm_model = tf.keras.models.load_model(“convlstm_model.h5”)
+
+#Testando o modelo ConvLSTM nos dados de teste
+```
+Carregando os dados de teste dos sensores
+Os dados estão em arquivos .wav com os nomes no formato ensaio_replica_sensor.wav na pasta “teste”
+Por exemplo: 49_1_force.wav significa o arquivo do sensor de força do ensaio 49 réplica 1
+```
+#Criando uma lista vazia para armazenar os dados de teste dos sensores
+test_data = []
+
+#Percorrendo os arquivos na pasta “teste”
+for file in os.listdir(“teste”): # Abrindo o arquivo como um objeto wave 
+	wav_file = wave.open(“teste/” + file, “r”) # Lendo os dados do arquivo como uma string de bytes 
+	data = wav_file.readframes(wav_file.getnframes()) # Convertendo os dados para um array numpy de inteiros 
+	data = np.frombuffer(data, dtype=np.int16) # Normalizando os dados para o intervalo entre -1 e 1 
+	data = data / np.max(np.abs(data)) # Fechando o arquivo wav_file.close() # Adicionando os dados à lista test_data 	test_data.append(data)
+
+#Convertendo a lista test_data em um array numpy
+test_data = np.array(test_data)
+
+#Verificando o formato do array test_data
+print(test_data.shape)
+```
+O formato é (96, 44100), ou seja, 96 arquivos com 44100 amostras cada segmentando os dados de teste em janelas de tempo de 1 segundo com sobreposição de 50%
+Cada janela terá 44100 / 2 = 22050 amostras
+O número total de janelas será 96 x 2 - 1 = 191
+```
+#Criando uma lista vazia para armazenar os dados de teste segmentados
+test_segmented_data = []
+
+#Percorrendo os arquivos na lista test_data
+for file in test_data: # Criando uma variável para armazenar o índice inicial da janela 
+	start_index = 0 # Criando um loop enquanto o índice inicial for menor que o número total de amostras 
+	while start_index < len(file): # Criando uma variável para armazenar o índice final da janela 
+		end_index = start_index + 22050 # Verificando se o índice final é maior que o número total de amostras 
+	if end_index > len(file): # Se for maior, ajustar o índice final para o último valor possível 
+		end_index = len(file) # Extraindo a janela do arquivo usando os índices inicial e final 
+	window = file[start_index:end_index] # Adicionando a janela à lista test_segmented_data 
+	test_segmented_data.append(window) # Atualizando o índice inicial para a próxima janela com sobreposição de 50% start_index += 11025
+
+#Convertendo a lista test_segmented_data em um array numpy
+test_segmented_data = np.array(test_segmented_data)
+
+#Verificando o formato do array test_segmented_data
+print(test_segmented_data.shape)
+```
+O formato é (191, 22050), ou seja, 191 janelas com 22050 amostras cada uma
+Extraindo as características dos dados de teste usando transformadas de Fourier e wavelet
+As transformadas de Fourier vão obter os espectros de frequência dos dados
+As transformadas wavelet vão obter os coeficientes wavelet dos dados
+```
+#Criando uma lista vazia para armazenar os espectros de frequência dos dados de teste
+test_frequency_data = []
+
+#Percorrendo as janelas na lista test_segmented_data
+for window in test_segmented_data: # Aplicando a transformada de Fourier na janela spectrum = fft.fft(window) # Calculando o módulo do 					     # espectro spectrum = np.abs(spectrum). Normalizando o espectro pelo número de amostras 
+	spectrum = spectrum / len(window) # Adicionando o espectro à lista test_frequency_data test_frequency_data.append(spectrum)
+
+#Convertendo a lista test_frequency_data em um array numpy
+test_frequency_data = np.array(test_frequency_data)
+
+#Verificando o formato do array test_frequency_data
+print(test_frequency_data.shape)
+```
+O formato é (191, 22050), ou seja, 191 espectros com 22050 valores cada um
+```
+#Criando uma lista vazia para armazenar os coeficientes wavelet dos dados de teste
+test_wavelet_data = []
+
+#Percorrendo as janelas na lista test_segmented_data
+for window in test_segmented_data: # Aplicando a transformada wavelet na janela usando a wavelet db4 e 4 níveis de decomposição 
+	coeffs = pywt.wavedec(window, “db4”, level=4) # Concatenando os coeficientes em um único vetor
+	coeffs = np.concatenate(coeffs) # Adicionando os coeficientes à lista test_wavelet_data 
+	test_wavelet_data.append(coeffs)
+
+#Convertendo a lista test_wavelet_data em um array numpy
+test_wavelet_data = np.array(test_wavelet_data)
+
+#Verificando o formato do array test_wavelet_data
+print(test_wavelet_data.shape)
+```
+O formato é (191, 22050), ou seja, 191 vetores de coeficientes com 22050 valores cada um
+Predizendo o RUL e o TCM da ferramenta usando o modelo ConvLSTM nos dados de teste
+```
+#Criando uma lista vazia para armazenar as predições do RUL e do TCM da ferramenta
+predictions = []
+#Percorrendo os arquivos na lista test_segmented_data
+for i in range(len(test_segmented_data)): # Inicializando o estado atual como os dados do primeiro segundo do ensaio i 
+	current_state = test_segmented_data[i*2] # Inicializando o RUL e o TCM da ferramenta como zero RUL = 0 
+	TCM = 0 # Inicializando o fim do ensaio como falso 
+	done = False # Criando um loop enquanto o ensaio não terminar 
+	while not done: # Escolhendo a ação que maximiza o vetor Q previsto pelo modelo ConvLSTM para o estado atual 
+		action = np.argmax(convlstm_model.predict(current_state)) # Executando a ação escolhida e observando o próximo estado, o 											    #	fim do ensaio e o desgaste da ferramenta 
+		next_state, done, wear = execute_action(action) # Atualizando o estado atual como o próximo estado 
+		current_state = next_state # Atualizando o RUL da ferramenta como a soma do RUL atual e do tempo de 
+						   # usinagem correspondente à ação escolhida 
+		RUL += action_time(action) # Atualizando o TCM da ferramenta como o desgaste da ferramenta observado 
+		TCM = wear # Verificando se o ensaio terminou 
+		if done: # Se terminou, adicionando o RUL e o TCM da ferramenta à lista predictions 
+			predictions.append((RUL, TCM)) # Sair do loop break
+
+#Convertendo a lista predictions em um array numpy
+predictions = np.array(predictions)
+
+#Verificando o formato do array predictions
+print(predictions.shape)
+```
+O formato é (48, 2), ou seja, 48 predições com 2 valores cada um (RUL e TCM)
+Comparando as predições do RUL e do TCM da ferramenta com os valores reais medidos pelo microscópio óptico e com os valores obtidos por outros métodos existentes na literatura
+```
+#Carregando os valores reais do RUL e do TCM da ferramenta de um arquivo .csv chamado “real_values.csv”
+real_values = pd.read_csv(“real_values.csv”)
+
+#Carregando os valores obtidos pelo método baseado em redes neurais artificiais (ANN) de um arquivo .csv chamado “ann_values.csv”
+ann_values = pd.read_csv(“ann_values.csv”)
+
+#Carregando os valores obtidos pelo método baseado em support vector regression (SVR) de um arquivo .csv chamado “svr_values.csv”
+svr_values = pd.read_csv(“svr_values.csv”)
+
+#Calculando as métricas para avaliar o desempenho dos métodos: erro médio absoluto (MAE), erro quadrático médio (MSE) e coeficiente de determinação (R^2)
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+#Criando uma lista vazia para armazenar as métricas para cada método
+metrics = []
+
+#Percorrendo os nomes dos métodos
+for method in [“convlstm”, “ann”, “svr”]: # Criando uma lista vazia para armazenar as métricas para o método atual 
+	method_metrics = [] # Percorrendo os nomes das variáveis (RUL e TCM) 
+	for variable in [“RUL”, “TCM”]: # Calculando o MAE entre os valores reais e os valores do método atual para a variável atual 
+		mae = mean_absolute_error(real_values[variable], eval(method + “_values”)[variable]) # Adicionando o MAE à lista method_metrics 
+		method_metrics.append(mae) # Calculando o MSE entre os valores reais e os valores do método atual para a variável atual 
+		mse = mean_squared_error(real_values[variable], eval(method + “_values”)[variable]) # Adicionando o MSE à lista method_metrics 
+		method_metrics.append(mse) # Calculando o R^2 entre os valores reais e os valores do método atual para a variável atual
+		r2 = r2_score(real_values[variable], eval(method + “_values”)[variable]) # Adicionando o R^2 à lista method_metrics
+    method_metrics.append(r2)
+# Adicionando a lista method_metrics à lista metrics
+metrics.append(method_metrics)
+
+#Convertendo a lista metrics em um array numpy
+metrics = np.array(metrics)
+
+#Verificando o formato do array metrics
+print(metrics.shape)
+```
+O formato é (3, 6), ou seja, 3 métodos com 6 métricas cada um (MAE, MSE e R^2 para RUL e TCM)
+Criando uma tabela para mostrar os valores das métricas para cada método
+```
+#Importando a biblioteca pandas
+import pandas as pd
+
+#Criando um dataframe com os valores das métricas e os nomes das colunas e dos índices
+metrics_df = pd.DataFrame(metrics, columns=[“MAE_RUL”, “MSE_RUL”, “R2_RUL”, “MAE_TCM”, “MSE_TCM”, “R2_TCM”], index=[“convlstm”, “ann”, “svr”])
+
+#Imprimindo o dataframe
+print(metrics_df)
